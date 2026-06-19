@@ -1,3 +1,5 @@
+> 🌐 Idioma: **Português** (este arquivo) · [English](README.en.md)
+
 # ipod-iflash-repair
 
 Conserto rápido da corrupção de **"first sector"** que afeta iPods modados com
