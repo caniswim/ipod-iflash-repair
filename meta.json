@@ -1,0 +1,13 @@
+{
+  "disk_model_match": "ipod",
+  "regions": [
+    {
+      "part": 1,
+      "abs": 258048,
+      "len": 131072,
+      "file": "part1.bin",
+      "kind": "fat-reserved",
+      "type": "0xb"
+    }
+  ]
+}
