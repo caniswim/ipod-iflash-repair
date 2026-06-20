@@ -8,10 +8,36 @@ apenas o que estiver zerado -> nunca toca na FAT/dados. Seguro e idempotente.
 
   sudo ipod_repair.py save      # rodar com o iPod saudavel (e apos cada reformat)
   sudo ipod_repair.py restore   # rodar quando o iPod nao funcionar (padrao)
+  sudo ipod_repair.py check     # read-only: imprime OK | CORRUPT | NOTFOUND
+  sudo ipod_repair.py autofsck  # desmonta -> fsck.fat -a -w -> save (so se saudavel)
 """
 import os, sys, re, glob, json, subprocess, time
 
-BK = os.path.dirname(os.path.abspath(__file__))   # backups ficam junto do script
+
+def backup_dir():
+    """Onde ficam mbr.bin/part*.bin/meta.json.
+
+    Ordem: $IPOD_BK -> pasta do proprio script se ela tiver o backup (checkout) ->
+    ~SUDO_USER/ipod-repair (caso instalado em /usr/local/sbin e rodado via sudo) ->
+    pasta do script. Mantem o repo publicado portatil e o helper root-only funcional.
+    """
+    env = os.environ.get("IPOD_BK")
+    if env:
+        return env
+    here = os.path.dirname(os.path.abspath(__file__))
+    if os.path.exists(os.path.join(here, "meta.json")):
+        return here
+    su = os.environ.get("SUDO_USER")
+    if su:
+        import pwd
+        try:
+            return os.path.join(pwd.getpwnam(su).pw_dir, "ipod-repair")
+        except KeyError:
+            pass
+    return here
+
+
+BK = backup_dir()
 SS = 4096                  # setor logico (4Kn)
 RAW_LEAD = 16 * SS         # 64 KiB de cabecalho p/ particoes nao-FAT (ex: firmware)
 
@@ -125,6 +151,44 @@ def do_save():
             pass
     chown_bk()
     print("Backup atualizado em", BK)
+    git_sync()
+
+
+def git_sync():
+    """Best-effort: commita e da push do backup p/ o remoto, para restaurar de
+    qualquer maquina. Roda o git como o DONO do BK (usa as credenciais dele, nao
+    do root) e nunca derruba o save se falhar. Desligar com IPOD_GIT_PUSH=0."""
+    if os.environ.get("IPOD_GIT_PUSH", "1") == "0":
+        return
+    if not os.path.isdir(f"{BK}/.git"):
+        return
+    import pwd, datetime
+    try:
+        st = os.stat(BK)
+        owner = pwd.getpwuid(st.st_uid).pw_name
+    except (OSError, KeyError):
+        return
+    files = [f for f in ("mbr.bin", "meta.json") if os.path.exists(f"{BK}/{f}")]
+    files += [os.path.basename(p) for p in glob.glob(f"{BK}/part*.bin")]
+    if not files:
+        return
+
+    def g(*a):                                       # git como o dono, se estamos root
+        pre = ["sudo", "-u", owner, "-H"] if (os.geteuid() == 0 and st.st_uid != 0) else []
+        return subprocess.run(pre + ["git", *a], cwd=BK, capture_output=True, text=True)
+
+    msg = "backup: auto-save " + datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c = g("commit", "-m", msg, "--", *files)         # commita so os arquivos de backup
+    if c.returncode != 0:
+        if "nothing to commit" in (c.stdout + c.stderr):
+            print("GIT: backup ja commitado, nada a enviar")
+        else:
+            print("GIT: commit falhou:", (c.stderr or c.stdout).strip()[:200])
+        return
+    p = g("push")
+    print("GIT: backup commitado e enviado ao remoto" if p.returncode == 0
+          else "GIT: commitado local, push falhou (offline?): "
+               + (p.stderr or p.stdout).strip()[:200])
 
 
 def do_restore():
@@ -161,11 +225,69 @@ def do_restore():
     print("Reparo concluido." if changed else "Setores OK, nada a reparar.")
 
 
+def do_check():
+    """Read-only. Imprime OK | CORRUPT | NOTFOUND. Nao escreve NADA no disco."""
+    disk = find_ipod_disk()
+    if not disk:
+        print("NOTFOUND")
+        sys.exit(3)
+    corrupt = is_zero(disk, 0, 512)                 # MBR zerado = bug do cold-boot
+    meta_path = f"{BK}/meta.json"
+    if os.path.exists(meta_path):
+        for r in json.load(open(meta_path)).get("regions", []):
+            ab = r.get("abs")
+            if ab is not None and is_zero(disk, ab, 512):
+                corrupt = True
+    print("CORRUPT" if corrupt else "OK")
+    sys.exit(1 if corrupt else 0)
+
+
+def do_autofsck():
+    """Desmonta as particoes FAT -> fsck.fat -a -w -> save (so se fsck < 4).
+
+    Aborta sem mexer em nada se a particao nao desmontar (provavel sincronizacao
+    em andamento). Nunca roda fsck num filesystem montado. Output parseavel.
+    """
+    disk = find_ipod_disk()
+    if not disk:
+        print("NOTFOUND")
+        sys.exit(3)
+    fats = [(i, dev) for i, dev, pt in list_partitions(disk) if pt in ("0xb", "0xc")]
+    if not fats:
+        print("NOFAT")
+        sys.exit(4)
+
+    for _, dev in fats:                              # desmonta o que estiver montado
+        if dev in open("/proc/mounts").read():
+            subprocess.run(["umount", dev], check=False)
+    busy = [dev for _, dev in fats if dev in open("/proc/mounts").read()]
+    if busy:                                         # nao desmontou -> NAO fscka (seguranca)
+        print("BUSY", " ".join(busy))
+        sys.exit(6)
+
+    worst = 0
+    for _, dev in fats:
+        rc = subprocess.run(["fsck.fat", "-a", "-w", dev]).returncode
+        print(f"FSCK {dev} rc={rc}")
+        worst = max(worst, rc)
+
+    if worst < 4:                                    # 0/1/2 = ok ou corrigido
+        do_save()
+        print("SAVED=1")
+        sys.exit(0)
+    print(f"SAVED=0 fsck_rc={worst} (erros nao corrigidos, backup NAO atualizado)")
+    sys.exit(5)
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "restore"
     if cmd == "save":
         do_save()
     elif cmd == "restore":
         do_restore()
+    elif cmd == "check":
+        do_check()
+    elif cmd == "autofsck":
+        do_autofsck()
     else:
-        sys.exit(f"uso: {sys.argv[0]} [save|restore]")
+        sys.exit(f"uso: {sys.argv[0]} [save|restore|check|autofsck]")

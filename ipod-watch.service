@@ -1,0 +1,14 @@
+[Unit]
+Description=iPod iFlash auto-check (detecta, pergunta fsck/save, auto-recovery)
+Documentation=https://github.com/caniswim/ipod-iflash-repair
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/ipod-repair/ipod-watch.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
