@@ -3,11 +3,19 @@
   "regions": [
     {
       "part": 1,
-      "abs": 258048,
+      "abs": 201842688,
       "len": 131072,
       "file": "part1.bin",
       "kind": "fat-reserved",
-      "type": "0xb"
+      "type": "0xc"
+    },
+    {
+      "part": 2,
+      "abs": 258048,
+      "len": 65536,
+      "file": "part2.bin",
+      "kind": "raw",
+      "type": "0x3f"
     }
   ]
 }
